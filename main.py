@@ -114,3 +114,19 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
+# ---2: FETCH FOR MOBILE APP ---
+@app.get("/medicines")
+async def get_all_medicines():
+    print("[*] Mobile app requested medicine history.")
+    conn = sqlite3.connect(DB_FILE)
+    # Configure SQLite to return dictionaries instead of raw tuples
+    conn.row_factory = sqlite3.Row
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
+    rows = cursor.fetchall()
+    conn.close()
+
+    # Convert SQL rows to a JSON array for the mobile app
+    return JSONResponse(content=[dict(row) for row in rows])
+
+
