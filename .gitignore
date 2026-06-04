@@ -1,0 +1,13 @@
+# Environments
+.env
+.venv/
+venv/
+__pycache__/
+
+# Databases (NEVER upload local state to GitHub)
+*.db
+*.sqlite3
+medicines.db
+
+# OS Files
+.DS_Store
