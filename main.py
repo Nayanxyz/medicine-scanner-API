@@ -1,7 +1,6 @@
 import os
 import cv2
 import json
-import sqlite3
 import numpy as np
 from PIL import Image
 from datetime import datetime
@@ -11,24 +10,32 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from google import genai
 import io
 import csv
+import psycopg2
+import psycopg2.extras
 
 # --- INITIALIZATION ---
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
+DATABASE_URL = os.getenv("DATABASE_URL")
+
 client = genai.Client(api_key=API_KEY)
 app = FastAPI()
 
-# --- DATABASE ARCHITECTURE ---
-DB_FILE = "medicines.db"
+
+# --- DATABASE ARCHITECTURE (POSTGRESQL) ---
+def get_db_connection():
+    # Establishes a fresh connection to Supabase
+    return psycopg2.connect(DATABASE_URL)
 
 
 def init_db():
-    print("Initializing SQLite Database...")
-    conn = sqlite3.connect(DB_FILE)
+    print("Verifying Supabase PostgreSQL Database...")
+    conn = get_db_connection()
     cursor = conn.cursor()
+    # Note: Postgres uses SERIAL for auto-incrementing IDs
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS scanned_medicines (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             medicine_name TEXT,
             expiry_date TEXT,
             manufacture_date TEXT,
@@ -37,6 +44,7 @@ def init_db():
         )
     ''')
     conn.commit()
+    cursor.close()
     conn.close()
 
 
@@ -61,7 +69,7 @@ def clean_and_prepare_image(file_bytes):
 # --- 1: THE SCANNER & SAVER ---
 @app.post("/extract-medicine")
 async def extract_medicine(front_image: UploadFile = File(...), back_image: UploadFile = File(...)):
-    print("Received POST request. Extracting and saving data...")
+    print("[*] Received POST request. Extracting via Gemini...")
     try:
         front_bytes = await front_image.read()
         back_bytes = await back_image.read()
@@ -89,12 +97,14 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         parsed_data = json.loads(clean_json)
 
-        # SAVE TO DATABASE
-        conn = sqlite3.connect(DB_FILE)
+        print("Saving to Supabase...")
+        conn = get_db_connection()
         cursor = conn.cursor()
+
+        # Note: Postgres uses %s for binding, and RETURNING id to get the generated key
         cursor.execute('''
             INSERT INTO scanned_medicines (medicine_name, expiry_date, manufacture_date, company, scan_timestamp)
-            VALUES (?, ?, ?, ?, ?)
+            VALUES (%s, %s, %s, %s, %s) RETURNING id;
         ''', (
             parsed_data.get("medicine_name"),
             parsed_data.get("expiry_date"),
@@ -102,53 +112,57 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
             parsed_data.get("company"),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ))
+
+        # Fetch the newly created ID
+        new_id = cursor.fetchone()[0]
         conn.commit()
 
-        # Attach the new database ID to the response so the mobile app knows it saved
-        parsed_data["db_id"] = cursor.lastrowid
+        parsed_data["db_id"] = new_id
+
+        cursor.close()
         conn.close()
 
         return JSONResponse(content=parsed_data)
 
     except Exception as e:
+        print(f"[!] ERROR: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
-# ---2: FETCH FOR MOBILE APP ---
+# --- 2: FETCH FOR MOBILE APP ---
 @app.get("/medicines")
 async def get_all_medicines():
-    print("[*] Mobile app requested medicine history.")
-    conn = sqlite3.connect(DB_FILE)
-    # Configure SQLite to return dictionaries instead of raw tuples
-    conn.row_factory = sqlite3.Row
-    cursor = conn.cursor()
+    print("[*] Mobile app requested medicine history from Supabase.")
+    conn = get_db_connection()
+    # RealDictCursor formats the Postgres output as a clean JSON dictionary, matching SQLite's row_factory
+    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
     cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
     rows = cursor.fetchall()
+
+    cursor.close()
     conn.close()
 
-    # Convert SQL rows to a JSON array for the mobile app
-    return JSONResponse(content=[dict(row) for row in rows])
+    return JSONResponse(content=rows)
 
 
-# ---3: EXPORT TO EXCEL/CSV ---
+# --- 3: EXPORT TO CSV ---
 @app.get("/export")
 async def export_medicines_csv():
-    print("[*] User requested CSV export.")
-    conn = sqlite3.connect(DB_FILE)
+    conn = get_db_connection()
     cursor = conn.cursor()
     cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
     rows = cursor.fetchall()
 
-    # Extract column names dynamically
-    column_names = [description[0] for description in cursor.description]
+    column_names = [desc[0] for desc in cursor.description]
+
+    cursor.close()
     conn.close()
 
-    # Build a virtual CSV file in memory
     stream = io.StringIO()
     writer = csv.writer(stream)
     writer.writerow(column_names)
     writer.writerows(rows)
 
     response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
-    response.headers["Content-Disposition"] = "attachment; filename=scanned_medicines.csv"
+    response.headers["Content-Disposition"] = "attachment; filename=supabase_medicines.csv"
     return response
