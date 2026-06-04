@@ -130,3 +130,25 @@ async def get_all_medicines():
     return JSONResponse(content=[dict(row) for row in rows])
 
 
+# ---3: EXPORT TO EXCEL/CSV ---
+@app.get("/export")
+async def export_medicines_csv():
+    print("[*] User requested CSV export.")
+    conn = sqlite3.connect(DB_FILE)
+    cursor = conn.cursor()
+    cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
+    rows = cursor.fetchall()
+
+    # Extract column names dynamically
+    column_names = [description[0] for description in cursor.description]
+    conn.close()
+
+    # Build a virtual CSV file in memory
+    stream = io.StringIO()
+    writer = csv.writer(stream)
+    writer.writerow(column_names)
+    writer.writerows(rows)
+
+    response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
+    response.headers["Content-Disposition"] = "attachment; filename=scanned_medicines.csv"
+    return response
