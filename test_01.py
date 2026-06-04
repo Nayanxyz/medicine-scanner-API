@@ -50,3 +50,20 @@ def process_medicine_images(image_paths):
     }
     """
 
+    try:
+        # We pass the prompt first, followed by the unpacked list of cleaned images
+        payload = [prompt] + cleaned_images
+
+        response = client.models.generate_content(
+            model='gemini-3.5-flash',
+            contents=payload
+        )
+
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        parsed_data = json.loads(clean_json)
+        return json.dumps(parsed_data, indent=4)
+
+    except Exception as e:
+        return f"Extraction Failed: {e}"
+
+
