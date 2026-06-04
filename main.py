@@ -12,6 +12,7 @@ import io
 import csv
 import psycopg2
 import psycopg2.extras
+from typing import Optional
 
 # --- INITIALIZATION ---
 load_dotenv()
@@ -68,20 +69,22 @@ def clean_and_prepare_image(file_bytes):
 
 # --- 1: THE SCANNER & SAVER ---
 @app.post("/extract-medicine")
-async def extract_medicine(front_image: UploadFile = File(...), back_image: UploadFile = File(...)):
+async def extract_medicine(
+        front_image: UploadFile = File(...),
+        back_image: Optional[UploadFile] = File(None)  # Now optional
+):
     print("[*] Received POST request. Extracting via Gemini...")
     try:
-        front_bytes = await front_image.read()
-        back_bytes = await back_image.read()
+        # Always process the front image
+        cleaned_images = [clean_and_prepare_image(await front_image.read())]
 
-        cleaned_images = [
-            clean_and_prepare_image(front_bytes),
-            clean_and_prepare_image(back_bytes)
-        ]
+        # Only process the back image if the user actually sent one
+        if back_image is not None:
+            cleaned_images.append(clean_and_prepare_image(await back_image.read()))
 
         prompt = """
         You are an expert pharmaceutical data extraction AI. 
-        Analyze the front and back images of this medicine.
+        Analyze the provided image(s) of this medicine.
         Extract the combined data and return ONLY a raw JSON object.
         {
             "medicine_name": "String",
@@ -97,11 +100,10 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         parsed_data = json.loads(clean_json)
 
-        print("Saving to Supabase...")
+        print("[*] Saving to Supabase...")
         conn = get_db_connection()
         cursor = conn.cursor()
 
-        # Note: Postgres uses %s for binding, and RETURNING id to get the generated key
         cursor.execute('''
             INSERT INTO scanned_medicines (medicine_name, expiry_date, manufacture_date, company, scan_timestamp)
             VALUES (%s, %s, %s, %s, %s) RETURNING id;
@@ -113,10 +115,8 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ))
 
-        # Fetch the newly created ID
         new_id = cursor.fetchone()[0]
         conn.commit()
-
         parsed_data["db_id"] = new_id
 
         cursor.close()
@@ -127,7 +127,6 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
     except Exception as e:
         print(f"[!] ERROR: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
-
 
 # --- 2: FETCH FOR MOBILE APP ---
 @app.get("/medicines")
@@ -166,3 +165,18 @@ async def export_medicines_csv():
     response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
     response.headers["Content-Disposition"] = "attachment; filename=supabase_medicines.csv"
     return response
+
+# --- 4: DELETE A RECORD ---
+@app.delete("/medicines/{medicine_id}")
+async def delete_medicine(medicine_id: int):
+    print(f"[*] Deleting DB ID {medicine_id} from Supabase...")
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('DELETE FROM scanned_medicines WHERE id = %s', (medicine_id,))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        return JSONResponse(content={"status": "success", "message": f"Deleted ID {medicine_id}"})
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
