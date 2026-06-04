@@ -104,3 +104,13 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
         ))
         conn.commit()
 
+        # Attach the new database ID to the response so the mobile app knows it saved
+        parsed_data["db_id"] = cursor.lastrowid
+        conn.close()
+
+        return JSONResponse(content=parsed_data)
+
+    except Exception as e:
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+
+
