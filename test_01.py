@@ -67,3 +67,12 @@ def process_medicine_images(image_paths):
         return f"Extraction Failed: {e}"
 
 
+# --- EXECUTION ---
+if __name__ == "__main__":
+    # We now pass an array of files
+    target_images = ["front_foil.jpeg", "back_foil.jpeg"]
+
+    result = process_medicine_images(target_images)
+
+    print("\n[+] Final Merged Extraction Result:")
+    print(result)
