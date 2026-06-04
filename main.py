@@ -82,3 +82,25 @@ async def extract_medicine(front_image: UploadFile = File(...), back_image: Uplo
             "company": "String"
         }
         """
+
+        payload = [prompt] + cleaned_images
+        response = client.models.generate_content(model='gemini-3.5-flash', contents=payload)
+
+        clean_json = response.text.replace('```json', '').replace('```', '').strip()
+        parsed_data = json.loads(clean_json)
+
+        # SAVE TO DATABASE
+        conn = sqlite3.connect(DB_FILE)
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO scanned_medicines (medicine_name, expiry_date, manufacture_date, company, scan_timestamp)
+            VALUES (?, ?, ?, ?, ?)
+        ''', (
+            parsed_data.get("medicine_name"),
+            parsed_data.get("expiry_date"),
+            parsed_data.get("manufacture_date"),
+            parsed_data.get("company"),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        conn.commit()
+
