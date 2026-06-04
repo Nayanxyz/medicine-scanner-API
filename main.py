@@ -1,13 +1,16 @@
 import os
 import cv2
+import json
 import sqlite3
 import numpy as np
 from PIL import Image
+from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI
+from fastapi import FastAPI, File, UploadFile
+from fastapi.responses import JSONResponse, StreamingResponse
 from google import genai
-
-
+import io
+import csv
 
 # --- INITIALIZATION ---
 load_dotenv()
@@ -55,3 +58,27 @@ def clean_and_prepare_image(file_bytes):
     return Image.fromarray(img_rgb)
 
 
+# --- 1: THE SCANNER & SAVER ---
+@app.post("/extract-medicine")
+async def extract_medicine(front_image: UploadFile = File(...), back_image: UploadFile = File(...)):
+    print("Received POST request. Extracting and saving data...")
+    try:
+        front_bytes = await front_image.read()
+        back_bytes = await back_image.read()
+
+        cleaned_images = [
+            clean_and_prepare_image(front_bytes),
+            clean_and_prepare_image(back_bytes)
+        ]
+
+        prompt = """
+        You are an expert pharmaceutical data extraction AI. 
+        Analyze the front and back images of this medicine.
+        Extract the combined data and return ONLY a raw JSON object.
+        {
+            "medicine_name": "String",
+            "expiry_date": "YYYY-MM",
+            "manufacture_date": "YYYY-MM",
+            "company": "String"
+        }
+        """
