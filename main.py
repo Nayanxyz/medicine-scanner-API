@@ -6,8 +6,10 @@ from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
+from typing import Optional
 from google import genai
+from google.genai import types  # Imported for structured output configuration
 import psycopg2
 import psycopg2.extras
 
@@ -29,12 +31,14 @@ def init_db():
     print("[*] Verifying Supabase PostgreSQL Database...")
     conn = get_db_connection()
     cursor = conn.cursor()
+    # Added mrp column to align with frontend requirements
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS scanned_medicines (
             id SERIAL PRIMARY KEY,
             medicine_name TEXT,
             expiry_date TEXT,
             manufacture_date TEXT,
+            mrp TEXT,
             company TEXT,
             scan_timestamp TEXT
         )
@@ -49,18 +53,19 @@ init_db()
 
 # --- BACKGROUND TASK ---
 def save_medicine_to_db(parsed_data: dict):
-    """Saves data to DB without waiting."""
-    print("[*] Background DB save initiated...")
+    """Saves data to DB without stalling the client response."""
+    print("Background DB save initiated...")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('''
-            INSERT INTO scanned_medicines (medicine_name, expiry_date, manufacture_date, company, scan_timestamp)
-            VALUES (%s, %s, %s, %s, %s);
+            INSERT INTO scanned_medicines (medicine_name, expiry_date, manufacture_date, mrp, company, scan_timestamp)
+            VALUES (%s, %s, %s, %s, %s, %s);
         ''', (
             parsed_data.get("medicine_name"),
             parsed_data.get("expiry_date"),
             parsed_data.get("manufacture_date"),
+            parsed_data.get("mrp"),
             parsed_data.get("company"),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ))
@@ -72,9 +77,19 @@ def save_medicine_to_db(parsed_data: dict):
         print(f"[!] Background DB save failed: {e}")
 
 
-# --- API MODELS ---
+# --- API & DATA SCHEMAS ---
 class OCRTextPayload(BaseModel):
     raw_text: str
+
+
+# Pydantic schema for strict Gemini structured extraction
+class MedicineDataSchema(BaseModel):
+    medicine_name: Optional[str] = Field(None, description="The commercial name of the medicine")
+    expiry_date: Optional[str] = Field(None,
+                                       description="Expiry date formatted as YYYY-MM or MM/YY if exact format unavailable")
+    manufacture_date: Optional[str] = Field(None, description="Manufacturing date formatted as YYYY-MM or MM/YY")
+    mrp: Optional[str] = Field(None, description="Maximum Retail Price, including currency symbol if present")
+    company: Optional[str] = Field(None, description="The manufacturing or marketing pharmaceutical company")
 
 
 # --- 1: THE TEXT-ONLY PIPELINE ---
@@ -83,32 +98,29 @@ async def structure_text(payload: OCRTextPayload, background_tasks: BackgroundTa
     print("[*] Received raw text. Structuring via Gemini...")
     try:
         prompt = f"""
-        You are a strict data extraction AI. Extract medical details from the text below.
-        Return ONLY a raw JSON object. Do not include markdown, code blocks, or conversational text.
-        If a field is not found, use null.
-
-        Format required:
-        {{
-            "medicine_name": "String",
-            "expiry_date": "YYYY-MM",
-            "manufacture_date": "YYYY-MM",
-            "company": "String"
-        }}
+        Extract all relevant medical inventory details from the following raw OCR text block.
+        Ensure you look carefully for the product name, dates, pricing markings, and manufacturer branding.
 
         Raw OCR Text:
         {payload.raw_text}
         """
 
-        response = client.models.generate_content(model='gemini-3.5-flash', contents=prompt)
+        # Enforce structured native JSON parsing via Google GenAI SDK using valid model
+        response = client.models.generate_content(
+            model='gemini-2.5-flash',
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                response_mime_type="application/json",
+                response_schema=MedicineDataSchema,
+            ),
+        )
 
-        # Clean the output just in case the LLM ignores strict JSON instructions
-        clean_json = response.text.replace('```json', '').replace('```', '').strip()
-        parsed_data = json.loads(clean_json)
+        # The response text is guaranteed to parse straight into our dictionary structure
+        parsed_data = json.loads(response.text)
 
-        # Hand off the DB save to a background thread
+        # Hand off the DB save to a background thread execution loop
         background_tasks.add_task(save_medicine_to_db, parsed_data)
 
-        # Immediately return the data to the user
         return JSONResponse(content=parsed_data)
 
     except Exception as e:
