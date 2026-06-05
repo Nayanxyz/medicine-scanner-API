@@ -66,6 +66,27 @@ def clean_and_prepare_image(file_bytes):
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     return Image.fromarray(img_rgb)
 
+def save_medicine_to_db(parsed_data: dict):
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            INSERT INTO scanned_medicines (medicine_name, expiry_date, manufacture_date, company, scan_timestamp)
+            VALUES (%s, %s, %s, %s, %s);
+        ''', (
+            parsed_data.get("medicine_name"),
+            parsed_data.get("expiry_date"),
+            parsed_data.get("manufacture_date"),
+            parsed_data.get("company"),
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        ))
+        conn.commit()
+        cursor.close()
+        conn.close()
+        print("[*] Background DB save complete.")
+    except Exception as e:
+        print(f" Background DB save failed: {e}")
+
 
 # --- 1: THE SCANNER & SAVER ---
 @app.post("/extract-medicine")
@@ -73,7 +94,7 @@ async def extract_medicine(
         front_image: UploadFile = File(...),
         back_image: Optional[UploadFile] = File(None)  # Now optional
 ):
-    print("[*] Received POST request. Extracting via Gemini...")
+    print("Received POST request. Extracting via Gemini...")
     try:
         # Always process the front image
         cleaned_images = [clean_and_prepare_image(await front_image.read())]
@@ -100,7 +121,7 @@ async def extract_medicine(
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         parsed_data = json.loads(clean_json)
 
-        print("[*] Saving to Supabase...")
+        print("Saving to Supabase...")
         conn = get_db_connection()
         cursor = conn.cursor()
 
