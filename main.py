@@ -91,10 +91,11 @@ def save_medicine_to_db(parsed_data: dict):
 # --- 1: THE SCANNER & SAVER ---
 @app.post("/extract-medicine")
 async def extract_medicine(
+        background_tasks: BackgroundTasks,
         front_image: UploadFile = File(...),
-        back_image: Optional[UploadFile] = File(None)  # Now optional
+        back_image: Optional[UploadFile] = File(None)
 ):
-    print("Received POST request. Extracting via Gemini...")
+    print("[*] Received POST request. Extracting via Gemini...")
     try:
         # Always process the front image
         cleaned_images = [clean_and_prepare_image(await front_image.read())]
