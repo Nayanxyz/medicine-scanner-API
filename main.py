@@ -95,7 +95,7 @@ async def extract_medicine(
         front_image: UploadFile = File(...),
         back_image: Optional[UploadFile] = File(None)
 ):
-    print("[*] Received POST request. Extracting via Gemini...")
+    print("Received POST request. Extracting via Gemini...")
     try:
         # Always process the front image
         cleaned_images = [clean_and_prepare_image(await front_image.read())]
