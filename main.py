@@ -112,7 +112,7 @@ async def structure_text(payload: OCRTextPayload, background_tasks: BackgroundTa
         return JSONResponse(content=parsed_data)
 
     except Exception as e:
-        print(f"[!] ERROR: {e}")
+        print(f"ERROR: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
 
 
