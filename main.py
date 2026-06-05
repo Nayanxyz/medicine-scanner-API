@@ -5,7 +5,7 @@ import numpy as np
 from PIL import Image
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, UploadFile, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from google import genai
 import io
