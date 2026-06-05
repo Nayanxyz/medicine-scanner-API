@@ -13,6 +13,7 @@ from google.genai import types  # Imported for structured output configuration
 import psycopg2
 import psycopg2.extras
 
+
 # --- INITIALIZATION ---
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
@@ -84,12 +85,11 @@ class OCRTextPayload(BaseModel):
 
 # Pydantic schema for strict Gemini structured extraction
 class MedicineDataSchema(BaseModel):
-    medicine_name: Optional[str] = Field(None, description="The commercial name of the medicine")
-    expiry_date: Optional[str] = Field(None,
-                                       description="Expiry date formatted as YYYY-MM or MM/YY if exact format unavailable")
-    manufacture_date: Optional[str] = Field(None, description="Manufacturing date formatted as YYYY-MM or MM/YY")
-    mrp: Optional[str] = Field(None, description="Maximum Retail Price, including currency symbol if present")
-    company: Optional[str] = Field(None, description="The manufacturing or marketing pharmaceutical company")
+    medicine_name: str = Field(description="The commercial name of the medicine. Return 'Unknown' if not found.")
+    expiry_date: str = Field(description="Expiry date formatted as YYYY-MM. Return 'Unknown' if not found.")
+    manufacture_date: str = Field(description="Manufacturing date formatted as YYYY-MM. Return 'Unknown' if not found.")
+    mrp: str = Field(description="Maximum Retail Price. Return 'Unknown' if not found.")
+    company: str = Field(description="The manufacturing company. Return 'Unknown' if not found.")
 
 
 # --- 1: THE TEXT-ONLY PIPELINE ---
