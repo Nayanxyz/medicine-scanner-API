@@ -122,6 +122,8 @@ async def extract_medicine(
         clean_json = response.text.replace('```json', '').replace('```', '').strip()
         parsed_data = json.loads(clean_json)
 
+        background_tasks.add_task(save_medicine_to_db, parsed_data)
+
         print("Saving to Supabase...")
         conn = get_db_connection()
         cursor = conn.cursor()
