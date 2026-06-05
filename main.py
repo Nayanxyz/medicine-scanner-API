@@ -78,7 +78,7 @@ class OCRTextPayload(BaseModel):
 
 
 # --- 1: THE TEXT-ONLY PIPELINE ---
-@app.post("/structure-text")
+@app.post("/scan")
 async def structure_text(payload: OCRTextPayload, background_tasks: BackgroundTasks):
     print("[*] Received raw text. Structuring via Gemini...")
     try:
