@@ -173,6 +173,35 @@ def ask_openrouter_vision(prompt: str, image_bytes_list: List[bytes]) -> dict:
     return json.loads(text)
 
 
+def ask_huggingface_ocr(image_bytes: bytes) -> dict:
+    print("[*] Attempting Hugging Face OCR...")
+    API_URL = "https://api-inference.huggingface.co/models/microsoft/layoutlmv3-base"
+    headers = {"Authorization": f"Bearer {os.getenv('HUGGINGFACE_API_KEY')}"}
+
+    response = requests.post(API_URL, headers=headers, data=image_bytes)
+    response.raise_for_status()
+
+    # Hugging Face models return raw text/OCR data.
+    # You will need to parse the response differently than JSON AI responses.
+    return response.json()
+
+
+def parse_ocr_to_json(raw_text):
+    print(f"[*] Raw OCR Output: {raw_text}")
+    # If raw_text is empty or just brackets, return None so the endpoint knows it failed
+    if not raw_text or len(str(raw_text)) < 10:
+        return None
+
+        # Placeholder for your future regex logic
+    return {
+        "medicine_name": "Detected via OCR",
+        "expiry_date": "Unknown",
+        "manufacture_date": "Unknown",
+        "mrp": "Unknown",
+        "company": "Unknown"
+    }
+
+
 # --- THE BULLETPROOF ENDPOINT ---
 @app.post("/scan-binary")
 async def process_binary_image(files: List[UploadFile] = File(...)):
@@ -181,61 +210,58 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
         image_bytes_list = [await f.read() for f in files]
 
         prompt = """
-        You are a highly precise medical data extraction AI. Look at these raw, high-resolution images of different sides of a medicine box.
+                    You are a highly precise medical data extraction AI. Look at these raw, high-resolution images of different sides of a medicine box.
 
-        CRITICAL RULES:
-        1. Separate Batch Numbers (B.No) from Dates.
-        2. MFD/MFG/PKD = Manufacture Date. EXP/USE BY = Expiry Date.
-        3. PRICING ACCURACY: Distinguish clearly between 0, 8, and 9. Include currency symbols (₹ or Rs).
-        4. Return "Unknown" if unreadable.
-        
-        STRICT RULES:
-                1. If you see text, DO NOT return 'Unknown'. Make a logical prediction based on character shapes.
-                2. If 'MFG' or 'EXP' is blurry, look at surrounding context to infer the date.
-                3. For MRP, ignore formatting (like commas or spaces); just return the numbers.
-                4. If a field is 80% likely to be correct, output the value. Precision is more important than perfect confidence.
+                    CRITICAL RULES:
+                    1. Separate Batch Numbers (B.No) from Dates.
+                    2. MFD/MFG/PKD = Manufacture Date. EXP/USE BY = Expiry Date.
+                    3. PRICING ACCURACY: Distinguish clearly between 0, 8, and 9. Include currency symbols (₹ or Rs).
+                    4. Return "Unknown" if unreadable.
 
-                
+                    STRICT RULES:
+                            1. If you see text, DO NOT return 'Unknown'. Make a logical prediction based on character shapes.
+                            2. If 'MFG' or 'EXP' is blurry, look at surrounding context to infer the date.
+                            3. For MRP, ignore formatting (like commas or spaces); just return the numbers.
+                            4. If a field is 80% likely to be correct, output the value. Precision is more important than perfect confidence.
 
-        Expected JSON keys: medicine_name, expiry_date, manufacture_date, mrp, company.
-        """
+
+
+                    Expected JSON keys: medicine_name, expiry_date, manufacture_date, mrp, company.
+                    """
 
         data = None
 
-        # Try Gemini 2.0
-        # 1. Primary: Gemini 2.0
+        # 2. THE WATERFALL
+        # Try Gemini
         try:
-            data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes_list)
+            data = ask_gemini_vision_binary('gemini-2.0-flash', prompt, image_bytes_list)
         except Exception as e1:
-            print(f"[!] Gemini 2.5 failed: {str(e1)}")
+            print(f"[!] Gemini failed: {e1}")
 
-            # 2. Secondary: OpenRouter
+            # Try OpenRouter
             try:
                 data = ask_openrouter_vision(prompt, image_bytes_list)
             except Exception as e2:
-                print(f"[!] OpenRouter failed: {str(e2)}")
+                print(f"[!] OpenRouter failed: {e2}")
 
-                # 3. Last Resort: Grok
+                # Try Hugging Face
+                # 3. EMERGENCY: Hugging Face
                 try:
-                    data = ask_grok_vision_binary(prompt, image_bytes_list)
-                except Exception as e3:
-                    print(f"[!] Grok failed: {str(e3)}")
-                    # THIS IS WHERE YOU ARE HITTING 503
-                    return JSONResponse(
-                        content={"error": f"All engines failed. Grok error: {str(e3)}"},
-                        status_code=503
-                    )
+                    if image_bytes_list:  # Check if list is not empty
+                        raw_text = ask_huggingface_ocr(image_bytes_list[0])
+                        data = parse_ocr_to_json(raw_text)
+                    else:
+                        raise ValueError("No image provided for OCR")
+                except Exception as hf_err:
+                    print(f"[!] Hugging Face Failed: {hf_err}")
+                    return JSONResponse(content={"error": "All AI systems failed."}, status_code=503)
 
         # 3. VALIDATION
         if not data or not isinstance(data, dict):
             return JSONResponse(content={"error": "AI returned invalid format."}, status_code=500)
 
         # 4. DATABASE SAVE
-        try:
-            save_medicine_to_db(data)
-        except Exception as db_err:
-            print(f"[!] DATABASE SAVE FAILED: {db_err}")
-            return JSONResponse(content={"error": "Data extracted but failed to save."}, status_code=500)
+        save_medicine_to_db(data)
 
         # 5. SUCCESS
         return JSONResponse(content=data)
