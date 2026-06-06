@@ -85,12 +85,12 @@ class MedicineDataSchema(BaseModel):
     company: str = Field(description="The manufacturing company. Return 'Unknown' if not found.")
 
 
-# --- RAW BINARY AI ENGINES ---
+
+# --- RAW BINARY MULTI-IMAGE AI ENGINES ---
 def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: List[bytes]) -> dict:
-    print(f"[*] Attempting {model_name} Vision via Binary Stream...")
+    print(f" Attempting {model_name} Vision via Binary Stream...")
     contents = [prompt]
 
-    # Feed every scanned side to Gemini
     for img_bytes in image_bytes_list:
         contents.append(types.Part.from_bytes(data=img_bytes, mime_type='image/jpeg'))
 
@@ -105,26 +105,29 @@ def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: Lis
     return json.loads(response.text)
 
 
-def ask_grok_vision_binary(prompt: str, image_bytes: bytes) -> dict:
-    """Fallback Engine: Grok requires Base64, so we encode it locally only if Google fails."""
-    print("Attempting Grok Vision Fallback...")
+def ask_grok_vision_binary(prompt: str, image_bytes_list: List[bytes]) -> dict:
+    print("[*] Attempting Grok Vision Fallback...")
     GROK_API_KEY = os.getenv("GROK_API_KEY")
     if not GROK_API_KEY:
         raise ValueError("Grok API key missing.")
 
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
 
-    # Encode bytes to base64 for Grok's REST endpoint
-    b64_str = base64.b64encode(image_bytes).decode('utf-8')
+    content_list = [{"type": "text", "text": prompt}]
+
+    # Encode all images for Grok
+    for img_bytes in image_bytes_list:
+        b64_str = base64.b64encode(img_bytes).decode('utf-8')
+        content_list.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}
+        })
 
     payload = {
         "model": "grok-2-vision",
         "messages": [
             {"role": "system", "content": "You output strict JSON matching the requested schema. No markdown."},
-            {"role": "user", "content": [
-                {"type": "text", "text": prompt},
-                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}}
-            ]}
+            {"role": "user", "content": content_list}
         ],
         "response_format": {"type": "json_object"}
     }
@@ -134,7 +137,7 @@ def ask_grok_vision_binary(prompt: str, image_bytes: bytes) -> dict:
     return json.loads(response.json()['choices'][0]['message']['content'])
 
 
-# --- 1: THE RAW BINARY VISION PIPELINE ---
+# --- THE BULLETPROOF ENDPOINT ---
 @app.post("/scan-binary")
 async def process_binary_image(files: List[UploadFile] = File(...)):
     try:
@@ -147,25 +150,24 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
         CRITICAL RULES:
         1. Separate Batch Numbers (B.No) from Dates.
         2. MFD/MFG/PKD = Manufacture Date. EXP/USE BY = Expiry Date.
-        3. PRICING ACCURACY: Look intensely at the numbers. Distinguish clearly between 0, 8, and 9. If it says ₹349, do not output 340. Include currency symbols (₹ or Rs).
+        3. PRICING ACCURACY: Distinguish clearly between 0, 8, and 9. Include currency symbols (₹ or Rs).
         4. Return "Unknown" if unreadable.
         """
 
         parsed_data = None
 
+        # THE RESTORED WATERFALL EXECUTION
         try:
-            parsed_data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes_list)
+            # 1. Primary: Gemini 1.5 Flash (Massive Free Tier limit)
+            parsed_data = ask_gemini_vision_binary('gemini-1.5-flash', prompt, image_bytes_list)
         except Exception as e1:
-            print(f"[!] Gemini 2.5 Failed: {e1}")
-            return JSONResponse(content={"error": "All AI inference engines offline."}, status_code=503)
-
-        if parsed_data:
-            save_medicine_to_db(parsed_data)
-            return JSONResponse(content=parsed_data)
-
-    except Exception as fatal_error:
-        print(f"FATAL ERROR: {fatal_error}")
-        return JSONResponse(content={"error": str(fatal_error)}, status_code=500)
+            print(f"[!] Gemini 1.5 Failed: {e1}")
+            try:
+                # 2. Secondary: Grok 2 Vision
+                parsed_data = ask_grok_vision_binary(prompt, image_bytes_list)
+            except Exception as e2:
+                print(f"[!] Grok Failed: {e2}")
+                return JSONResponse(content={"error": "All AI models offline or rate-limited."}, status_code=503)
 
         if parsed_data:
             save_medicine_to_db(parsed_data)
