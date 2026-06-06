@@ -93,6 +93,62 @@ class MedicineDataSchema(BaseModel):
     company: str = Field(description="The manufacturing company. Return 'Unknown' if not found.")
 
 
+def ask_gemini_2_5(prompt: str) -> dict:
+    """Primary Engine: High Intelligence, Google Infra"""
+    print("[*] Attempting Gemini 2.5 Flash...")
+    response = client.models.generate_content(
+        model='gemini-2.5-flash',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=MedicineDataSchema,
+        ),
+    )
+    return json.loads(response.text)
+
+
+def ask_grok(prompt: str) -> dict:
+    """Secondary Engine: Multi-Vendor Fallback (xAI)"""
+    print("[*] Attempting Grok Fallback...")
+    GROK_API_KEY = os.getenv("GROK_API_KEY")
+    if not GROK_API_KEY:
+        raise ValueError("Grok API key missing.")
+
+    # Grok uses an OpenAI-compatible REST endpoint
+    headers = {
+        "Authorization": f"Bearer {GROK_API_KEY}",
+        "Content-Type": "application/json"
+    }
+    payload = {
+        "model": "grok-beta",  # Or grok-2-vision if doing direct images later
+        "messages": [
+            {"role": "system", "content": "You output strict JSON matching the requested schema. No markdown."},
+            {"role": "user", "content": prompt}
+        ],
+        "response_format": {"type": "json_object"}
+    }
+
+    response = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
+    response.raise_for_status()
+
+    raw_json_str = response.json()['choices'][0]['message']['content']
+    return json.loads(raw_json_str)
+
+
+def ask_gemini_1_5(prompt: str) -> dict:
+    """Tertiary Engine: The Cheap, Reliable Backup"""
+    print("[*] Attempting Gemini 1.5 Flash Backup...")
+    response = client.models.generate_content(
+        model='gemini-1.5-flash',
+        contents=prompt,
+        config=types.GenerateContentConfig(
+            response_mime_type="application/json",
+            response_schema=MedicineDataSchema,
+        ),
+    )
+    return json.loads(response.text)
+
+
 
 # --- 1: THE TEXT-ONLY PIPELINE ---
 @app.post("/scan")
