@@ -5,7 +5,7 @@ import io
 import base64
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks
+from fastapi import FastAPI, BackgroundTasks, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import Optional, List
@@ -76,11 +76,7 @@ def save_medicine_to_db(parsed_data: dict):
         print(f"[!] Background DB save failed: {e}")
 
 
-# --- API & DATA SCHEMAS ---
-class VisionPayload(BaseModel):
-    images_base64: List[str]
-
-
+# --- DATA SCHEMAS ---
 class MedicineDataSchema(BaseModel):
     medicine_name: str = Field(description="The commercial name of the medicine. Return 'Unknown' if not found.")
     expiry_date: str = Field(description="Expiry date formatted as YYYY-MM. Return 'Unknown' if not found.")
@@ -89,14 +85,14 @@ class MedicineDataSchema(BaseModel):
     company: str = Field(description="The manufacturing company. Return 'Unknown' if not found.")
 
 
-def ask_gemini_vision(model_name: str, prompt: str, base64_images: List[str]) -> dict:
-    print(f" Attempting {model_name} Vision...")
-    contents = [prompt]
-
-    # Convert base64 strings back to bytes for Gemini Vision
-    for b64_str in base64_images:
-        image_bytes = base64.b64decode(b64_str)
-        contents.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
+# --- RAW BINARY AI ENGINES ---
+def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes: bytes) -> dict:
+    """Directly feeds raw binary bytes to Google's infrastructure."""
+    print(f"Attempting {model_name} Vision via Binary Stream...")
+    contents = [
+        prompt,
+        types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
+    ]
 
     response = client.models.generate_content(
         model=model_name,
@@ -109,26 +105,26 @@ def ask_gemini_vision(model_name: str, prompt: str, base64_images: List[str]) ->
     return json.loads(response.text)
 
 
-def ask_grok_vision(prompt: str, base64_images: List[str]) -> dict:
-    print(" Attempting Grok Vision Fallback...")
+def ask_grok_vision_binary(prompt: str, image_bytes: bytes) -> dict:
+    """Fallback Engine: Grok requires Base64, so we encode it locally only if Google fails."""
+    print("Attempting Grok Vision Fallback...")
     GROK_API_KEY = os.getenv("GROK_API_KEY")
     if not GROK_API_KEY:
         raise ValueError("Grok API key missing.")
 
     headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
 
-    content_list = [{"type": "text", "text": prompt}]
-    for b64_str in base64_images:
-        content_list.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}
-        })
+    # Encode bytes to base64 for Grok's REST endpoint
+    b64_str = base64.b64encode(image_bytes).decode('utf-8')
 
     payload = {
         "model": "grok-2-vision",
         "messages": [
             {"role": "system", "content": "You output strict JSON matching the requested schema. No markdown."},
-            {"role": "user", "content": content_list}
+            {"role": "user", "content": [
+                {"type": "text", "text": prompt},
+                {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}}
+            ]}
         ],
         "response_format": {"type": "json_object"}
     }
@@ -138,19 +134,22 @@ def ask_grok_vision(prompt: str, base64_images: List[str]) -> dict:
     return json.loads(response.json()['choices'][0]['message']['content'])
 
 
-# --- 1: THE VISION PIPELINE ---
-@app.post("/scan")
-async def process_images(payload: VisionPayload):
+# --- 1: THE RAW BINARY VISION PIPELINE ---
+@app.post("/scan-binary")
+async def process_binary_image(file: UploadFile = File(...)):
+    """Receives physical file streams instead of bloated JSON."""
     try:
+        image_bytes = await file.read()
+
         prompt = """
-        You are a highly precise medical data extraction AI. Look at the provided images of medicine packaging and extract the exact inventory details.
+        You are a highly precise medical data extraction AI. Look at this raw, high-resolution image of medicine packaging.
 
         CRITICAL RULES FOR ACCURACY:
         1. Indian medicine packaging clusters text. You must carefully separate Batch Numbers (B.No) from Dates.
         2. Manufacture Date is abbreviated as "MFD", "MFG", or "PKD".
         3. Expiry Date is abbreviated as "EXP" or "USE BY".
-        4. MRP is written as "Max. Retail Price" or "Inclusive of all taxes".
-        5. DO NOT GUESS OR HALLUCINATE. Return "Unknown" if unreadable.
+        4. PRICING ACCURACY: Look intensely at the numbers. Distinguish clearly between 0, 8, and 9. If it says ₹349, do not output 340. Look at the loops of the numbers. Include currency symbols (₹ or Rs) if visible.
+        5. DO NOT GUESS OR HALLUCINATE. Return "Unknown" if unreadable or ambiguous.
 
         Expected JSON format keys: medicine_name, expiry_date, manufacture_date, mrp, company.
         """
@@ -159,17 +158,17 @@ async def process_images(payload: VisionPayload):
 
         # THE WATERFALL EXECUTION
         try:
-            parsed_data = ask_gemini_vision('gemini-2.5-flash', prompt, payload.images_base64)
+            parsed_data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes)
         except Exception as e1:
-            print(f"Gemini 2.5 Failed: {e1}")
+            print(f" Gemini 2.5 Failed: {e1}")
             try:
-                parsed_data = ask_grok_vision(prompt, payload.images_base64)
+                parsed_data = ask_grok_vision_binary(prompt, image_bytes)
             except Exception as e2:
-                print(f"Grok Failed: {e2}")
+                print(f" Grok Failed: {e2}")
                 try:
-                    parsed_data = ask_gemini_vision('gemini-1.5-flash', prompt, payload.images_base64)
+                    parsed_data = ask_gemini_vision_binary('gemini-1.5-flash', prompt, image_bytes)
                 except Exception as e3:
-                    print(f" Gemini 1.5 Failed: {e3}")
+                    print(f"Gemini 1.5 Failed: {e3}")
                     return JSONResponse(content={"error": "All AI inference engines offline."}, status_code=503)
 
         if parsed_data:
