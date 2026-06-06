@@ -8,7 +8,7 @@ from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional, List
+from typing import List
 from google import genai
 from google.genai import types
 import psycopg2
@@ -86,13 +86,13 @@ class MedicineDataSchema(BaseModel):
 
 
 # --- RAW BINARY AI ENGINES ---
-def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes: bytes) -> dict:
-    """Directly feeds raw binary bytes to Google's infrastructure."""
-    print(f"Attempting {model_name} Vision via Binary Stream...")
-    contents = [
-        prompt,
-        types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg')
-    ]
+def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: List[bytes]) -> dict:
+    print(f"[*] Attempting {model_name} Vision via Binary Stream...")
+    contents = [prompt]
+
+    # Feed every scanned side to Gemini
+    for img_bytes in image_bytes_list:
+        contents.append(types.Part.from_bytes(data=img_bytes, mime_type='image/jpeg'))
 
     response = client.models.generate_content(
         model=model_name,
@@ -136,40 +136,36 @@ def ask_grok_vision_binary(prompt: str, image_bytes: bytes) -> dict:
 
 # --- 1: THE RAW BINARY VISION PIPELINE ---
 @app.post("/scan-binary")
-async def process_binary_image(file: UploadFile = File(...)):
-    """Receives physical file streams instead of bloated JSON."""
+async def process_binary_image(files: List[UploadFile] = File(...)):
     try:
-        image_bytes = await file.read()
+        # Read the raw binary from every file uploaded
+        image_bytes_list = [await f.read() for f in files]
 
         prompt = """
-        You are a highly precise medical data extraction AI. Look at this raw, high-resolution image of medicine packaging.
+        You are a highly precise medical data extraction AI. Look at these raw, high-resolution images of different sides of a medicine box.
 
-        CRITICAL RULES FOR ACCURACY:
-        1. Indian medicine packaging clusters text. You must carefully separate Batch Numbers (B.No) from Dates.
-        2. Manufacture Date is abbreviated as "MFD", "MFG", or "PKD".
-        3. Expiry Date is abbreviated as "EXP" or "USE BY".
-        4. PRICING ACCURACY: Look intensely at the numbers. Distinguish clearly between 0, 8, and 9. If it says ₹349, do not output 340. Look at the loops of the numbers. Include currency symbols (₹ or Rs) if visible.
-        5. DO NOT GUESS OR HALLUCINATE. Return "Unknown" if unreadable or ambiguous.
-
-        Expected JSON format keys: medicine_name, expiry_date, manufacture_date, mrp, company.
+        CRITICAL RULES:
+        1. Separate Batch Numbers (B.No) from Dates.
+        2. MFD/MFG/PKD = Manufacture Date. EXP/USE BY = Expiry Date.
+        3. PRICING ACCURACY: Look intensely at the numbers. Distinguish clearly between 0, 8, and 9. If it says ₹349, do not output 340. Include currency symbols (₹ or Rs).
+        4. Return "Unknown" if unreadable.
         """
 
         parsed_data = None
 
-        # THE WATERFALL EXECUTION
         try:
-            parsed_data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes)
+            parsed_data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes_list)
         except Exception as e1:
-            print(f" Gemini 2.5 Failed: {e1}")
-            try:
-                parsed_data = ask_grok_vision_binary(prompt, image_bytes)
-            except Exception as e2:
-                print(f" Grok Failed: {e2}")
-                try:
-                    parsed_data = ask_gemini_vision_binary('gemini-1.5-flash', prompt, image_bytes)
-                except Exception as e3:
-                    print(f"Gemini 1.5 Failed: {e3}")
-                    return JSONResponse(content={"error": "All AI inference engines offline."}, status_code=503)
+            print(f"[!] Gemini 2.5 Failed: {e1}")
+            return JSONResponse(content={"error": "All AI inference engines offline."}, status_code=503)
+
+        if parsed_data:
+            save_medicine_to_db(parsed_data)
+            return JSONResponse(content=parsed_data)
+
+    except Exception as fatal_error:
+        print(f"FATAL ERROR: {fatal_error}")
+        return JSONResponse(content={"error": str(fatal_error)}, status_code=500)
 
         if parsed_data:
             save_medicine_to_db(parsed_data)
