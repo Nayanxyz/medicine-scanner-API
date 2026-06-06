@@ -153,41 +153,53 @@ def ask_gemini_1_5(prompt: str) -> dict:
 # --- 1: THE TEXT-ONLY PIPELINE ---
 @app.post("/scan")
 async def structure_text(payload: OCRTextPayload):
-    print("Received raw text. Structuring via Gemini...")
     try:
         prompt = f"""
         You are a highly precise medical data extraction AI. Extract the exact inventory details from the raw OCR text below.
 
         CRITICAL RULES FOR ACCURACY:
         1. Indian medicine packaging clusters text. You must carefully separate Batch Numbers (B.No) from Dates.
-        2. Manufacture Date is often abbreviated as "MFD", "MFG", or "PKD" (Packed).
-        3. Expiry Date is often abbreviated as "EXP" or "USE BY".
-        4. MRP is often written as "Max. Retail Price" or "Inclusive of all taxes".
-        5. DO NOT GUESS OR HALLUCINATE. If a date is smeared or partially missing, return ONLY the visible numbers. If it is completely unreadable, return "Unknown".
+        2. Manufacture Date is abbreviated as "MFD", "MFG", or "PKD".
+        3. Expiry Date is abbreviated as "EXP" or "USE BY".
+        4. MRP is written as "Max. Retail Price" or "Inclusive of all taxes".
+        5. DO NOT GUESS OR HALLUCINATE. Return "Unknown" if unreadable.
+
+        Expected JSON format keys: medicine_name, expiry_date, manufacture_date, mrp, company.
 
         Raw OCR Text:
         {payload.raw_text}
         """
 
-        response = client.models.generate_content(
-            model='gemini-2.5-flash',
-            contents=prompt,
-            config=types.GenerateContentConfig(
-                response_mime_type="application/json",
-                response_schema=MedicineDataSchema,
-            ),
-        )
+        parsed_data = None
 
-        parsed_data = json.loads(response.text)
+        # THE WATERFALL EXECUTION
+        try:
+            parsed_data = ask_gemini_2_5(prompt)
+        except Exception as e1:
+            print(f"[!] Gemini 2.5 Failed: {e1}")
 
-        # SYNCHRONOUS LOCK: Do not return to the phone until Supabase confirms the save.
-        save_medicine_to_db(parsed_data)
+            try:
+                parsed_data = ask_grok(prompt)
+            except Exception as e2:
+                print(f"[!] Grok Failed: {e2}")
 
-        return JSONResponse(content=parsed_data)
+                try:
+                    parsed_data = ask_gemini_1_5(prompt)
+                except Exception as e3:
+                    print(f"[!] Gemini 1.5 Failed: {e3}")
+                    return JSONResponse(
+                        content={"error": "All AI inference engines are currently offline. Please try again."},
+                        status_code=503
+                    )
 
-    except Exception as e:
-        print(f"ERROR: {e}")
-        return JSONResponse(content={"error": str(e)}, status_code=500)
+        # SYNCHRONOUS LOCK: Save to DB before returning
+        if parsed_data:
+            save_medicine_to_db(parsed_data)
+            return JSONResponse(content=parsed_data)
+
+    except Exception as fatal_error:
+        print(f"FATAL ERROR: {fatal_error}")
+        return JSONResponse(content={"error": str(fatal_error)}, status_code=500)
 
 # --- 2: FETCH HISTORY ---
 @app.get("/medicines")
