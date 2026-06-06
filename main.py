@@ -87,8 +87,9 @@ class MedicineDataSchema(BaseModel):
 
 
 # --- RAW BINARY MULTI-IMAGE AI ENGINES ---
+# --- RAW BINARY MULTI-IMAGE AI ENGINES ---
 def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: List[bytes]) -> dict:
-    print(f" Attempting {model_name} Vision via Binary Stream...")
+    print(f"[*] Attempting {model_name} Vision via Binary Stream...")
     contents = [prompt]
 
     for img_bytes in image_bytes_list:
@@ -115,7 +116,6 @@ def ask_grok_vision_binary(prompt: str, image_bytes_list: List[bytes]) -> dict:
 
     content_list = [{"type": "text", "text": prompt}]
 
-    # Encode all images for Grok
     for img_bytes in image_bytes_list:
         b64_str = base64.b64encode(img_bytes).decode('utf-8')
         content_list.append({
@@ -124,24 +124,33 @@ def ask_grok_vision_binary(prompt: str, image_bytes_list: List[bytes]) -> dict:
         })
 
     payload = {
-        "model": "grok-2-vision",
+        "model": "grok-2-vision-1212",  # The precise versioned model string
         "messages": [
-            {"role": "system", "content": "You output strict JSON matching the requested schema. No markdown."},
+            {"role": "system",
+             "content": "You are a precise data extractor. You must output ONLY raw, valid JSON matching the requested keys. Do not use markdown blocks like ```json."},
             {"role": "user", "content": content_list}
-        ],
-        "response_format": {"type": "json_object"}
+        ]
+        # Stripped the response_format flag that triggered the 400 crash
     }
 
-    response = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
-    response.raise_for_status()
-    return json.loads(response.json()['choices'][0]['message']['content'])
+    response = requests.post("[https://api.x.ai/v1/chat/completions](https://api.x.ai/v1/chat/completions)",
+                             headers=headers, json=payload)
+
+    if not response.ok:
+        print(f"[!] Grok API Error Details: {response.text}")
+        response.raise_for_status()
+
+    text_response = response.json()['choices'][0]['message']['content']
+
+    # Sanitize any rogue markdown formatting Grok might return
+    text_response = text_response.replace('```json', '').replace('```', '').strip()
+    return json.loads(text_response)
 
 
 # --- THE BULLETPROOF ENDPOINT ---
 @app.post("/scan-binary")
 async def process_binary_image(files: List[UploadFile] = File(...)):
     try:
-        # Read the raw binary from every file uploaded
         image_bytes_list = [await f.read() for f in files]
 
         prompt = """
@@ -152,18 +161,20 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
         2. MFD/MFG/PKD = Manufacture Date. EXP/USE BY = Expiry Date.
         3. PRICING ACCURACY: Distinguish clearly between 0, 8, and 9. Include currency symbols (₹ or Rs).
         4. Return "Unknown" if unreadable.
+
+        Expected keys: medicine_name, expiry_date, manufacture_date, mrp, company.
         """
 
         parsed_data = None
 
-        # THE RESTORED WATERFALL EXECUTION
+        # THE STRATEGIC WATERFALL
         try:
-            # 1. Primary: Gemini 1.5 Flash (Massive Free Tier limit)
-            parsed_data = ask_gemini_vision_binary('gemini-1.5-flash', prompt, image_bytes_list)
+            # 1. Primary: Gemini 2.0 Flash (The stable free-tier workhorse)
+            parsed_data = ask_gemini_vision_binary('gemini-2.0-flash', prompt, image_bytes_list)
         except Exception as e1:
-            print(f"[!] Gemini 1.5 Failed: {e1}")
+            print(f"[!] Gemini 2.0 Failed: {e1}")
             try:
-                # 2. Secondary: Grok 2 Vision
+                # 2. Secondary: Grok 2 Vision 1212
                 parsed_data = ask_grok_vision_binary(prompt, image_bytes_list)
             except Exception as e2:
                 print(f"[!] Grok Failed: {e2}")
