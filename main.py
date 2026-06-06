@@ -2,18 +2,18 @@ import os
 import json
 import csv
 import io
+import base64
 from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, BackgroundTasks
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
-from typing import Optional
+from typing import Optional, List
 from google import genai
-from google.genai import types  # Imported for structured output configuration
+from google.genai import types
 import psycopg2
 import psycopg2.extras
 import requests
-
 
 # --- INITIALIZATION ---
 load_dotenv()
@@ -30,10 +30,9 @@ def get_db_connection():
 
 
 def init_db():
-    print("[*] Verifying Supabase PostgreSQL Database...")
+    print("Verifying Supabase PostgreSQL Database...")
     conn = get_db_connection()
     cursor = conn.cursor()
-    # Added mrp column to align with frontend requirements
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS scanned_medicines (
             id SERIAL PRIMARY KEY,
@@ -53,9 +52,7 @@ def init_db():
 init_db()
 
 
-# --- BACKGROUND TASK ---
 def save_medicine_to_db(parsed_data: dict):
-    """Saves data to DB without stalling the client response."""
     print("Background DB save initiated...")
     try:
         conn = get_db_connection()
@@ -80,11 +77,10 @@ def save_medicine_to_db(parsed_data: dict):
 
 
 # --- API & DATA SCHEMAS ---
-class OCRTextPayload(BaseModel):
-    raw_text: str
+class VisionPayload(BaseModel):
+    images_base64: List[str]
 
 
-# Pydantic schema for strict Gemini structured extraction
 class MedicineDataSchema(BaseModel):
     medicine_name: str = Field(description="The commercial name of the medicine. Return 'Unknown' if not found.")
     expiry_date: str = Field(description="Expiry date formatted as YYYY-MM. Return 'Unknown' if not found.")
@@ -93,12 +89,18 @@ class MedicineDataSchema(BaseModel):
     company: str = Field(description="The manufacturing company. Return 'Unknown' if not found.")
 
 
-def ask_gemini_2_5(prompt: str) -> dict:
-    """Primary Engine: High Intelligence, Google Infra"""
-    print("[*] Attempting Gemini 2.5 Flash...")
+def ask_gemini_vision(model_name: str, prompt: str, base64_images: List[str]) -> dict:
+    print(f" Attempting {model_name} Vision...")
+    contents = [prompt]
+
+    # Convert base64 strings back to bytes for Gemini Vision
+    for b64_str in base64_images:
+        image_bytes = base64.b64decode(b64_str)
+        contents.append(types.Part.from_bytes(data=image_bytes, mime_type='image/jpeg'))
+
     response = client.models.generate_content(
-        model='gemini-2.5-flash',
-        contents=prompt,
+        model=model_name,
+        contents=contents,
         config=types.GenerateContentConfig(
             response_mime_type="application/json",
             response_schema=MedicineDataSchema,
@@ -107,55 +109,41 @@ def ask_gemini_2_5(prompt: str) -> dict:
     return json.loads(response.text)
 
 
-def ask_grok(prompt: str) -> dict:
-    """Secondary Engine: Multi-Vendor Fallback (xAI)"""
-    print("[*] Attempting Grok Fallback...")
+def ask_grok_vision(prompt: str, base64_images: List[str]) -> dict:
+    print(" Attempting Grok Vision Fallback...")
     GROK_API_KEY = os.getenv("GROK_API_KEY")
     if not GROK_API_KEY:
         raise ValueError("Grok API key missing.")
 
-    # Grok uses an OpenAI-compatible REST endpoint
-    headers = {
-        "Authorization": f"Bearer {GROK_API_KEY}",
-        "Content-Type": "application/json"
-    }
+    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
+
+    content_list = [{"type": "text", "text": prompt}]
+    for b64_str in base64_images:
+        content_list.append({
+            "type": "image_url",
+            "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}
+        })
+
     payload = {
-        "model": "grok-beta",  # Or grok-2-vision if doing direct images later
+        "model": "grok-2-vision",
         "messages": [
             {"role": "system", "content": "You output strict JSON matching the requested schema. No markdown."},
-            {"role": "user", "content": prompt}
+            {"role": "user", "content": content_list}
         ],
         "response_format": {"type": "json_object"}
     }
 
     response = requests.post("https://api.x.ai/v1/chat/completions", headers=headers, json=payload)
     response.raise_for_status()
-
-    raw_json_str = response.json()['choices'][0]['message']['content']
-    return json.loads(raw_json_str)
+    return json.loads(response.json()['choices'][0]['message']['content'])
 
 
-def ask_gemini_1_5(prompt: str) -> dict:
-    """Tertiary Engine: The Cheap, Reliable Backup"""
-    print("[*] Attempting Gemini 1.5 Flash Backup...")
-    response = client.models.generate_content(
-        model='gemini-1.5-flash',
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            response_mime_type="application/json",
-            response_schema=MedicineDataSchema,
-        ),
-    )
-    return json.loads(response.text)
-
-
-
-# --- 1: THE TEXT-ONLY PIPELINE ---
+# --- 1: THE VISION PIPELINE ---
 @app.post("/scan")
-async def structure_text(payload: OCRTextPayload):
+async def process_images(payload: VisionPayload):
     try:
-        prompt = f"""
-        You are a highly precise medical data extraction AI. Extract the exact inventory details from the raw OCR text below.
+        prompt = """
+        You are a highly precise medical data extraction AI. Look at the provided images of medicine packaging and extract the exact inventory details.
 
         CRITICAL RULES FOR ACCURACY:
         1. Indian medicine packaging clusters text. You must carefully separate Batch Numbers (B.No) from Dates.
@@ -165,34 +153,25 @@ async def structure_text(payload: OCRTextPayload):
         5. DO NOT GUESS OR HALLUCINATE. Return "Unknown" if unreadable.
 
         Expected JSON format keys: medicine_name, expiry_date, manufacture_date, mrp, company.
-
-        Raw OCR Text:
-        {payload.raw_text}
         """
 
         parsed_data = None
 
         # THE WATERFALL EXECUTION
         try:
-            parsed_data = ask_gemini_2_5(prompt)
+            parsed_data = ask_gemini_vision('gemini-2.5-flash', prompt, payload.images_base64)
         except Exception as e1:
-            print(f"[!] Gemini 2.5 Failed: {e1}")
-
+            print(f"Gemini 2.5 Failed: {e1}")
             try:
-                parsed_data = ask_grok(prompt)
+                parsed_data = ask_grok_vision(prompt, payload.images_base64)
             except Exception as e2:
-                print(f"[!] Grok Failed: {e2}")
-
+                print(f"Grok Failed: {e2}")
                 try:
-                    parsed_data = ask_gemini_1_5(prompt)
+                    parsed_data = ask_gemini_vision('gemini-1.5-flash', prompt, payload.images_base64)
                 except Exception as e3:
-                    print(f"[!] Gemini 1.5 Failed: {e3}")
-                    return JSONResponse(
-                        content={"error": "All AI inference engines are currently offline. Please try again."},
-                        status_code=503
-                    )
+                    print(f" Gemini 1.5 Failed: {e3}")
+                    return JSONResponse(content={"error": "All AI inference engines offline."}, status_code=503)
 
-        # SYNCHRONOUS LOCK: Save to DB before returning
         if parsed_data:
             save_medicine_to_db(parsed_data)
             return JSONResponse(content=parsed_data)
@@ -200,6 +179,7 @@ async def structure_text(payload: OCRTextPayload):
     except Exception as fatal_error:
         print(f"FATAL ERROR: {fatal_error}")
         return JSONResponse(content={"error": str(fatal_error)}, status_code=500)
+
 
 # --- 2: FETCH HISTORY ---
 @app.get("/medicines")
