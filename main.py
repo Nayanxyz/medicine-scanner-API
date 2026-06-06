@@ -95,15 +95,21 @@ class MedicineDataSchema(BaseModel):
 # --- 1: THE TEXT-ONLY PIPELINE ---
 @app.post("/scan")
 async def structure_text(payload: OCRTextPayload, background_tasks: BackgroundTasks):
-    print("[*] Received raw text. Structuring via Gemini...")
+    print("Received raw text. Structuring via Gemini...")
     try:
         prompt = f"""
-        Extract all relevant medical inventory details from the following raw OCR text block.
-        Ensure you look carefully for the product name, dates, pricing markings, and manufacturer branding.
+                You are a highly precise medical data extraction AI. Extract the exact inventory details from the raw OCR text below.
 
-        Raw OCR Text:
-        {payload.raw_text}
-        """
+                CRITICAL RULES FOR ACCURACY:
+                1. Indian medicine packaging clusters text. You must carefully separate Batch Numbers (B.No) from Dates.
+                2. Manufacture Date is often abbreviated as "MFD", "MFG", or "PKD" (Packed).
+                3. Expiry Date is often abbreviated as "EXP" or "USE BY".
+                4. MRP is often written as "Max. Retail Price" or "Inclusive of all taxes".
+                5. DO NOT GUESS OR HALLUCINATE. If a date is smeared or partially missing, return ONLY the visible numbers. If it is completely unreadable, return "Unknown".
+
+                Raw OCR Text:
+                {payload.raw_text}
+                """
 
         # Enforce structured native JSON parsing via Google GenAI SDK using valid model
         response = client.models.generate_content(
