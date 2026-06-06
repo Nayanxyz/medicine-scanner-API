@@ -203,21 +203,28 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
         data = None
 
         # Try Gemini 2.0
+        # 1. Primary: Gemini 2.0
         try:
-            data = ask_gemini_vision_binary('gemini-2.0-flash', prompt, image_bytes_list)
+            data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes_list)
         except Exception as e1:
-            print(f"[!] Gemini failed: {e1}")
-            # Try OpenRouter
+            print(f"[!] Gemini 2.5 failed: {str(e1)}")
+
+            # 2. Secondary: OpenRouter
             try:
                 data = ask_openrouter_vision(prompt, image_bytes_list)
             except Exception as e2:
-                print(f"[!] OpenRouter failed: {e2}")
-                # Try Grok
+                print(f"[!] OpenRouter failed: {str(e2)}")
+
+                # 3. Last Resort: Grok
                 try:
                     data = ask_grok_vision_binary(prompt, image_bytes_list)
                 except Exception as e3:
-                    print(f"[!] Grok failed: {e3}")
-                    return JSONResponse(content={"error": "All AI models failed."}, status_code=503)
+                    print(f"[!] Grok failed: {str(e3)}")
+                    # THIS IS WHERE YOU ARE HITTING 503
+                    return JSONResponse(
+                        content={"error": f"All engines failed. Grok error: {str(e3)}"},
+                        status_code=503
+                    )
 
         # 3. VALIDATION
         if not data or not isinstance(data, dict):
