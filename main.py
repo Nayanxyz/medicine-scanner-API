@@ -26,7 +26,8 @@ app = FastAPI()
 
 # --- DATABASE LOGIC ---
 def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
+    # Adding connect_timeout=5 ensures it fails fast if DB is unreachable
+    return psycopg2.connect(DATABASE_URL, connect_timeout=5)
 
 
 def init_db():
@@ -87,9 +88,8 @@ class MedicineDataSchema(BaseModel):
 
 
 # --- RAW BINARY MULTI-IMAGE AI ENGINES ---
-# --- RAW BINARY MULTI-IMAGE AI ENGINES ---
 def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: List[bytes]) -> dict:
-    print(f"[*] Attempting {model_name} Vision via Binary Stream...")
+    print(f" Attempting {model_name} Vision via Binary Stream...")
     contents = [prompt]
 
     for img_bytes in image_bytes_list:
@@ -133,7 +133,7 @@ def ask_grok_vision_binary(prompt: str, image_bytes_list: List[bytes]) -> dict:
         # Stripped the response_format flag that triggered the 400 crash
     }
 
-    response = requests.post("[https://api.x.ai/v1/chat/completions](https://api.x.ai/v1/chat/completions)",
+    response = requests.post("https://api.x.ai/v1/chat/completions",
                              headers=headers, json=payload)
 
     if not response.ok:
@@ -147,10 +147,37 @@ def ask_grok_vision_binary(prompt: str, image_bytes_list: List[bytes]) -> dict:
     return json.loads(text_response)
 
 
+def ask_openrouter_vision(prompt: str, image_bytes_list: List[bytes]) -> dict:
+    print("[*] Attempting OpenRouter Fallback...")
+    headers = {
+        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
+        "HTTP-Referer": "https://medicine-scanner-api.onrender.com",  # Required by OpenRouter
+        "Content-Type": "application/json"
+    }
+
+    content_list = [{"type": "text", "text": prompt}]
+    for img_bytes in image_bytes_list:
+        b64_str = base64.b64encode(img_bytes).decode('utf-8')
+        content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}})
+
+    payload = {
+        "model": "anthropic/claude-3.5-sonnet",  # Highly accurate for medical OCR
+        "messages": [{"role": "user", "content": content_list}]
+    }
+
+    response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
+    response.raise_for_status()
+
+    # Strip markdown and return JSON
+    text = response.json()['choices'][0]['message']['content'].replace('```json', '').replace('```', '').strip()
+    return json.loads(text)
+
+
 # --- THE BULLETPROOF ENDPOINT ---
 @app.post("/scan-binary")
 async def process_binary_image(files: List[UploadFile] = File(...)):
     try:
+        # 1. READ INPUTS
         image_bytes_list = [await f.read() for f in files]
 
         prompt = """
@@ -161,28 +188,50 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
         2. MFD/MFG/PKD = Manufacture Date. EXP/USE BY = Expiry Date.
         3. PRICING ACCURACY: Distinguish clearly between 0, 8, and 9. Include currency symbols (₹ or Rs).
         4. Return "Unknown" if unreadable.
+        
+        STRICT RULES:
+                1. If you see text, DO NOT return 'Unknown'. Make a logical prediction based on character shapes.
+                2. If 'MFG' or 'EXP' is blurry, look at surrounding context to infer the date.
+                3. For MRP, ignore formatting (like commas or spaces); just return the numbers.
+                4. If a field is 80% likely to be correct, output the value. Precision is more important than perfect confidence.
 
-        Expected keys: medicine_name, expiry_date, manufacture_date, mrp, company.
+                
+
+        Expected JSON keys: medicine_name, expiry_date, manufacture_date, mrp, company.
         """
 
-        parsed_data = None
+        data = None
 
-        # THE STRATEGIC WATERFALL
+        # Try Gemini 2.0
         try:
-            # 1. Primary: Gemini 2.0 Flash (The stable free-tier workhorse)
-            parsed_data = ask_gemini_vision_binary('gemini-2.0-flash', prompt, image_bytes_list)
+            data = ask_gemini_vision_binary('gemini-2.0-flash', prompt, image_bytes_list)
         except Exception as e1:
-            print(f"[!] Gemini 2.0 Failed: {e1}")
+            print(f"[!] Gemini failed: {e1}")
+            # Try OpenRouter
             try:
-                # 2. Secondary: Grok 2 Vision 1212
-                parsed_data = ask_grok_vision_binary(prompt, image_bytes_list)
+                data = ask_openrouter_vision(prompt, image_bytes_list)
             except Exception as e2:
-                print(f"[!] Grok Failed: {e2}")
-                return JSONResponse(content={"error": "All AI models offline or rate-limited."}, status_code=503)
+                print(f"[!] OpenRouter failed: {e2}")
+                # Try Grok
+                try:
+                    data = ask_grok_vision_binary(prompt, image_bytes_list)
+                except Exception as e3:
+                    print(f"[!] Grok failed: {e3}")
+                    return JSONResponse(content={"error": "All AI models failed."}, status_code=503)
 
-        if parsed_data:
-            save_medicine_to_db(parsed_data)
-            return JSONResponse(content=parsed_data)
+        # 3. VALIDATION
+        if not data or not isinstance(data, dict):
+            return JSONResponse(content={"error": "AI returned invalid format."}, status_code=500)
+
+        # 4. DATABASE SAVE
+        try:
+            save_medicine_to_db(data)
+        except Exception as db_err:
+            print(f"[!] DATABASE SAVE FAILED: {db_err}")
+            return JSONResponse(content={"error": "Data extracted but failed to save."}, status_code=500)
+
+        # 5. SUCCESS
+        return JSONResponse(content=data)
 
     except Exception as fatal_error:
         print(f"FATAL ERROR: {fatal_error}")
