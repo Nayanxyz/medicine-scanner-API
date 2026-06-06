@@ -12,6 +12,7 @@ from google import genai
 from google.genai import types  # Imported for structured output configuration
 import psycopg2
 import psycopg2.extras
+import requests
 
 
 # --- INITIALIZATION ---
