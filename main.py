@@ -4,7 +4,7 @@ import csv
 import io
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File
+from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List
@@ -12,6 +12,7 @@ from google import genai
 from google.genai import types
 import psycopg2
 import psycopg2.extras
+from fastapi.middleware.cors import CORSMiddleware
 
 # --- INITIALIZATION ---
 load_dotenv()
