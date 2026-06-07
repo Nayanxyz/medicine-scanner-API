@@ -2,10 +2,9 @@ import os
 import json
 import csv
 import io
-import base64
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, BackgroundTasks, UploadFile, File
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, Field
 from typing import List
@@ -13,22 +12,19 @@ from google import genai
 from google.genai import types
 import psycopg2
 import psycopg2.extras
-import requests
 
 # --- INITIALIZATION ---
 load_dotenv()
 API_KEY = os.getenv("GEMINI_API_KEY")
 DATABASE_URL = os.getenv("DATABASE_URL")
 
+# Initialize Gemini Client
 client = genai.Client(api_key=API_KEY)
 app = FastAPI()
 
-
 # --- DATABASE LOGIC ---
 def get_db_connection():
-    # Adding connect_timeout=5 ensures it fails fast if DB is unreachable
     return psycopg2.connect(DATABASE_URL, connect_timeout=5)
-
 
 def init_db():
     print("Verifying Supabase PostgreSQL Database...")
@@ -49,12 +45,10 @@ def init_db():
     cursor.close()
     conn.close()
 
-
 init_db()
 
-
 def save_medicine_to_db(parsed_data: dict):
-    print("Background DB save initiated...")
+    print("[*] Synchronous DB save initiated...")
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -72,10 +66,9 @@ def save_medicine_to_db(parsed_data: dict):
         conn.commit()
         cursor.close()
         conn.close()
-        print("[*] Background DB save complete.")
+        print("[*] DB save complete.")
     except Exception as e:
-        print(f"[!] Background DB save failed: {e}")
-
+        print(f"[!] DB save failed: {e}")
 
 # --- DATA SCHEMAS ---
 class MedicineDataSchema(BaseModel):
@@ -85,11 +78,9 @@ class MedicineDataSchema(BaseModel):
     mrp: str = Field(description="Maximum Retail Price. Return 'Unknown' if not found.")
     company: str = Field(description="The manufacturing company. Return 'Unknown' if not found.")
 
-
-
-# --- RAW BINARY MULTI-IMAGE AI ENGINES ---
+# --- GEMINI AI ENGINE ---
 def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: List[bytes]) -> dict:
-    print(f" Attempting {model_name} Vision via Binary Stream...")
+    print(f"[*] Attempting {model_name} Vision via Binary Stream...")
     contents = [prompt]
 
     for img_bytes in image_bytes_list:
@@ -105,110 +96,13 @@ def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: Lis
     )
     return json.loads(response.text)
 
-
-def ask_grok_vision_binary(prompt: str, image_bytes_list: List[bytes]) -> dict:
-    print("[*] Attempting Grok Vision Fallback...")
-    GROK_API_KEY = os.getenv("GROK_API_KEY")
-    if not GROK_API_KEY:
-        raise ValueError("Grok API key missing.")
-
-    headers = {"Authorization": f"Bearer {GROK_API_KEY}", "Content-Type": "application/json"}
-
-    content_list = [{"type": "text", "text": prompt}]
-
-    for img_bytes in image_bytes_list:
-        b64_str = base64.b64encode(img_bytes).decode('utf-8')
-        content_list.append({
-            "type": "image_url",
-            "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}
-        })
-
-    payload = {
-        "model": "grok-2-vision-1212",  # The precise versioned model string
-        "messages": [
-            {"role": "system",
-             "content": "You are a precise data extractor. You must output ONLY raw, valid JSON matching the requested keys. Do not use markdown blocks like ```json."},
-            {"role": "user", "content": content_list}
-        ]
-        # Stripped the response_format flag that triggered the 400 crash
-    }
-
-    response = requests.post("https://api.x.ai/v1/chat/completions",
-                             headers=headers, json=payload)
-
-    if not response.ok:
-        print(f"[!] Grok API Error Details: {response.text}")
-        response.raise_for_status()
-
-    text_response = response.json()['choices'][0]['message']['content']
-
-    # Sanitize any rogue markdown formatting Grok might return
-    text_response = text_response.replace('```json', '').replace('```', '').strip()
-    return json.loads(text_response)
-
-
-def ask_openrouter_vision(prompt: str, image_bytes_list: List[bytes]) -> dict:
-    print("[*] Attempting OpenRouter Fallback...")
-    headers = {
-        "Authorization": f"Bearer {os.getenv('OPENROUTER_API_KEY')}",
-        "HTTP-Referer": "https://medicine-scanner-api.onrender.com",  # Required by OpenRouter
-        "Content-Type": "application/json"
-    }
-
-    content_list = [{"type": "text", "text": prompt}]
-    for img_bytes in image_bytes_list:
-        b64_str = base64.b64encode(img_bytes).decode('utf-8')
-        content_list.append({"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64_str}"}})
-
-    payload = {
-        "model": "anthropic/claude-3.5-sonnet",  # Highly accurate for medical OCR
-        "messages": [{"role": "user", "content": content_list}]
-    }
-
-    response = requests.post("https://openrouter.ai/api/v1/chat/completions", headers=headers, json=payload)
-    response.raise_for_status()
-
-    # Strip markdown and return JSON
-    text = response.json()['choices'][0]['message']['content'].replace('```json', '').replace('```', '').strip()
-    return json.loads(text)
-
-
-def ask_huggingface_ocr(image_bytes: bytes) -> dict:
-    print("[*] Attempting Hugging Face OCR...")
-    API_URL = "https://api-inference.huggingface.co/models/microsoft/layoutlmv3-base"
-    headers = {"Authorization": f"Bearer {os.getenv('HUGGINGFACE_API_KEY')}"}
-
-    response = requests.post(API_URL, headers=headers, data=image_bytes)
-    response.raise_for_status()
-
-    # Hugging Face models return raw text/OCR data.
-    # You will need to parse the response differently than JSON AI responses.
-    return response.json()
-
-
-def parse_ocr_to_json(raw_text):
-    print(f"[*] Raw OCR Output: {raw_text}")
-    # If raw_text is empty or just brackets, return None so the endpoint knows it failed
-    if not raw_text or len(str(raw_text)) < 10:
-        return None
-
-        # Placeholder for your future regex logic
-    return {
-        "medicine_name": "Detected via OCR",
-        "expiry_date": "Unknown",
-        "manufacture_date": "Unknown",
-        "mrp": "Unknown",
-        "company": "Unknown"
-    }
-
-
-# --- THE BULLETPROOF ENDPOINT ---
+# --- THE ENDPOINT ---
 @app.post("/scan-binary")
 async def process_binary_image(files: List[UploadFile] = File(...)):
     try:
-        # 1. READ INPUTS
         image_bytes_list = [await f.read() for f in files]
 
+        # Your original prompt, untouched
         prompt = """
                     You are a highly precise medical data extraction AI. Look at these raw, high-resolution images of different sides of a medicine box.
 
@@ -224,54 +118,33 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
                             3. For MRP, ignore formatting (like commas or spaces); just return the numbers.
                             4. If a field is 80% likely to be correct, output the value. Precision is more important than perfect confidence.
 
-
-
                     Expected JSON keys: medicine_name, expiry_date, manufacture_date, mrp, company.
                     """
 
-        data = None
-
-        # 2. THE WATERFALL
-        # Try Gemini
+        # 1. PRIMARY AND ONLY AI: Gemini
         try:
+            # Change to 'gemini-2.0-flash' if 'gemini-2.5-flash' throws a 404 Not Found error
             data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes_list)
-        except Exception as e1:
-            print(f"[!] Gemini failed: {e1}")
+        except Exception as ai_error:
+            print(f"[!] Gemini failed: {ai_error}")
+            return JSONResponse(content={"error": f"AI Engine Failed: {ai_error}"}, status_code=503)
 
-            # Try OpenRouter
-            try:
-                data = ask_openrouter_vision(prompt, image_bytes_list)
-            except Exception as e2:
-                print(f"[!] OpenRouter failed: {e2}")
-
-                # Try Hugging Face
-                # 3. EMERGENCY: Hugging Face
-                try:
-                    if image_bytes_list:  # Check if list is not empty
-                        raw_text = ask_huggingface_ocr(image_bytes_list[0])
-                        data = parse_ocr_to_json(raw_text)
-                    else:
-                        raise ValueError("No image provided for OCR")
-                except Exception as hf_err:
-                    print(f"[!] Hugging Face Failed: {hf_err}")
-                    return JSONResponse(content={"error": "All AI systems failed."}, status_code=503)
-
-        # 3. VALIDATION
+        # 2. VALIDATION
         if not data or not isinstance(data, dict):
             return JSONResponse(content={"error": "AI returned invalid format."}, status_code=500)
 
-        # 4. DATABASE SAVE
+        # 3. DATABASE SAVE
         save_medicine_to_db(data)
 
-        # 5. SUCCESS
+        # 4. SUCCESS
         return JSONResponse(content=data)
 
     except Exception as fatal_error:
-        print(f"FATAL ERROR: {fatal_error}")
+        print(f"[!] FATAL ERROR: {fatal_error}")
         return JSONResponse(content={"error": str(fatal_error)}, status_code=500)
 
 
-# --- 2: FETCH HISTORY ---
+# --- FETCH HISTORY ---
 @app.get("/medicines")
 async def get_all_medicines():
     conn = get_db_connection()
@@ -283,7 +156,7 @@ async def get_all_medicines():
     return JSONResponse(content=rows)
 
 
-# --- 3: EXPORT ---
+# --- EXPORT ---
 @app.get("/export")
 async def export_medicines_csv():
     conn = get_db_connection()
@@ -304,7 +177,7 @@ async def export_medicines_csv():
     return response
 
 
-# --- 4: DELETE ---
+# --- DELETE ---
 @app.delete("/medicines/{medicine_id}")
 async def delete_medicine(medicine_id: int):
     try:
