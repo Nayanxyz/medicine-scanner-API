@@ -14,6 +14,7 @@ import psycopg2
 import psycopg2.extras
 from fastapi.middleware.cors import CORSMiddleware
 
+
 # --- INITIALIZATION ---
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
@@ -28,6 +29,14 @@ GEMINI_KEYS = [
 GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
 
 app = FastAPI()
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], # In production, replace "*" with your specific frontend domains
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 
 # --- DATABASE LOGIC ---
