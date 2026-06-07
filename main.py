@@ -6,69 +6,80 @@ from datetime import datetime
 from dotenv import load_dotenv
 from fastapi import FastAPI, UploadFile, File, BackgroundTasks, HTTPException
 from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List
 from google import genai
 from google.genai import types
 import psycopg2
 import psycopg2.extras
-from fastapi.middleware.cors import CORSMiddleware
 
-
-# --- INITIALIZATION ---
+# ==========================================
+# 1. INITIALIZATION & ENVIRONMENT
+# ==========================================
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
-# LOAD MULTIPLE KEYS
-# Ensure your Render environment variables are named exactly like this
+# Load multiplexed keys. Strict filtering removes empty strings or None values.
 GEMINI_KEYS = [
     os.getenv("GEMINI_API_KEY_1"),
     os.getenv("GEMINI_API_KEY_2")
 ]
-# Filter out any None/empty values in case you only use 1 key temporarily
-GEMINI_KEYS = [k for k in GEMINI_KEYS if k]
+GEMINI_KEYS = [k for k in GEMINI_KEYS if k and k.strip()]
 
 app = FastAPI()
 
+# Enable CORS for future web-dashboard integration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, replace "*" with your specific frontend domains
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 
-# --- DATABASE LOGIC ---
+# ==========================================
+# 2. DATABASE ARCHITECTURE (SAFEGUARDED)
+# ==========================================
 def get_db_connection():
+    # 5-second timeout prevents infinite hanging during cold-starts
     return psycopg2.connect(DATABASE_URL, connect_timeout=5)
 
 
 def init_db():
-    print("Verifying Supabase PostgreSQL Database...")
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('''
-        CREATE TABLE IF NOT EXISTS scanned_medicines (
-            id SERIAL PRIMARY KEY,
-            medicine_name TEXT,
-            expiry_date TEXT,
-            manufacture_date TEXT,
-            mrp TEXT,
-            company TEXT,
-            scan_timestamp TEXT
-        )
-    ''')
-    conn.commit()
-    cursor.close()
-    conn.close()
+    print("[*] Verifying Supabase PostgreSQL Database...")
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS scanned_medicines (
+                id SERIAL PRIMARY KEY,
+                medicine_name TEXT,
+                expiry_date TEXT,
+                manufacture_date TEXT,
+                mrp TEXT,
+                company TEXT,
+                scan_timestamp TEXT
+            )
+        ''')
+        conn.commit()
+        cursor.close()
+        print("[*] Database Schema Verified.")
+    except Exception as e:
+        print(f"[!] Database init failed: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
 init_db()
 
 
 def save_medicine_to_db(parsed_data: dict):
-    print("Synchronous DB save initiated...")
+    print("Background DB save initiated...")
+    conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
@@ -76,34 +87,37 @@ def save_medicine_to_db(parsed_data: dict):
             INSERT INTO scanned_medicines (medicine_name, expiry_date, manufacture_date, mrp, company, scan_timestamp)
             VALUES (%s, %s, %s, %s, %s, %s);
         ''', (
-            parsed_data.get("medicine_name"),
-            parsed_data.get("expiry_date"),
-            parsed_data.get("manufacture_date"),
-            parsed_data.get("mrp"),
-            parsed_data.get("company"),
+            parsed_data.get("medicine_name", "Unknown"),
+            parsed_data.get("expiry_date", "Unknown"),
+            parsed_data.get("manufacture_date", "Unknown"),
+            parsed_data.get("mrp", "Unknown"),
+            parsed_data.get("company", "Unknown"),
             datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         ))
         conn.commit()
         cursor.close()
-        conn.close()
-        print("[*] DB save complete.")
+        print("[*] Background DB save complete.")
     except Exception as e:
-        print(f"[!] DB save failed: {e}")
+        print(f"[!] Background DB save failed: {e}")
+    finally:
+        if conn:
+            conn.close()
 
 
-# --- DATA SCHEMAS ---
+# ==========================================
+# 3. AI SCHEMAS & LOGIC
+# ==========================================
 class MedicineDataSchema(BaseModel):
-    medicine_name: str = Field(description="The commercial name of the medicine. Return 'Unknown' if not found.")
-    expiry_date: str = Field(description="Expiry date formatted as YYYY-MM. Return 'Unknown' if not found.")
-    manufacture_date: str = Field(description="Manufacturing date formatted as YYYY-MM. Return 'Unknown' if not found.")
-    mrp: str = Field(description="Maximum Retail Price. Return 'Unknown' if not found.")
-    company: str = Field(description="The manufacturing company. Return 'Unknown' if not found.")
+    medicine_name: str = Field(description="The commercial brand name. Return 'Unknown' if not found.")
+    expiry_date: str = Field(description="Expiry date (MM/YYYY). Return 'Unknown' if not found.")
+    manufacture_date: str = Field(description="Manufacturing date (MM/YYYY). Return 'Unknown' if not found.")
+    mrp: str = Field(description="Maximum Retail Price (Include ₹). Return 'Unknown' if not found.")
+    company: str = Field(description="Manufacturing company. Return 'Unknown' if not found.")
 
 
-# --- MULTI-KEY GEMINI AI ENGINE ---
 def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: List[bytes]) -> dict:
     if not GEMINI_KEYS:
-        raise ValueError("No Gemini API keys found in environment. Check Render settings.")
+        raise ValueError("CRITICAL: No Gemini API keys found in environment variables.")
 
     contents = [prompt]
     for img_bytes in image_bytes_list:
@@ -114,11 +128,10 @@ def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: Lis
         response_schema=MedicineDataSchema,
     )
 
-    # THE ROTATION LOOP
+    # Multiplexing Loop
     for index, key in enumerate(GEMINI_KEYS):
-        print(f"[*] Attempting {model_name} Vision with Key {index + 1}...")
+        print(f"Attempting {model_name} with Key {index + 1}...")
         try:
-            # Initialize a fresh client for this specific key
             client = genai.Client(api_key=key)
             response = client.models.generate_content(
                 model=model_name,
@@ -128,19 +141,35 @@ def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: Lis
             return json.loads(response.text)
 
         except Exception as e:
-            print(f"[!] Key {index + 1} failed: {e}")
-            # If we are on the last key and it still fails, crash out and tell the user
+            error_str = str(e)
+            print(f"Key {index + 1} failed: {error_str}")
+
+            # Smart Rotation: Only burn the next key if this is a Google-side quota or server error.
+            # Do NOT rotate if the user uploaded a corrupted image (400 Bad Request).
+            if "429" not in error_str and "503" not in error_str and "500" not in error_str:
+                raise Exception(
+                    f"Client/Payload error. Aborting rotation to protect secondary keys. Details: {error_str}")
+
             if index == len(GEMINI_KEYS) - 1:
-                raise Exception(f"All available Gemini keys failed or hit quota. Last error: {e}")
+                raise Exception(f"All available Gemini keys failed or hit quota. Last error: {error_str}")
 
 
-# --- THE ENDPOINT ---
+# ==========================================
+# 4. API ENDPOINTS
+# ==========================================
+
 @app.post("/scan-binary")
-async def process_binary_image(files: List[UploadFile] = File(...)):
+async def process_binary_image(
+        background_tasks: BackgroundTasks,
+        files: List[UploadFile] = File(...)
+):
     try:
+        # Defense 1: The Empty Payload Trap
+        if not files or len(files) == 0:
+            return JSONResponse(content={"error": "No images provided in the payload."}, status_code=400)
+
         image_bytes_list = [await f.read() for f in files]
 
-        # The highly optimized prompt
         prompt = """
         You are a specialized Data Extraction Engine for Indian pharmaceutical packaging.
         Analyze the provided images and extract the exact values for the requested fields.
@@ -158,72 +187,97 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
         3. DO NOT output 'Unknown' unless the section of the box containing that data is completely missing or pitch black.
         """
 
-        # 1. PRIMARY AI WITH ROTATION
         try:
-            # Note: I changed this back to gemini-2.0-flash because 2.5-flash often throws 404 errors on certain API versions.
-            data = ask_gemini_vision_binary('gemini-2.0-flash', prompt, image_bytes_list)
+            # Explicitly requesting the 2.5-flash architecture
+            data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes_list)
         except Exception as ai_error:
-            print(f"[!] AI Engine completely exhausted: {ai_error}")
-            return JSONResponse(content={"error": f"AI Engine Failed: {ai_error}"}, status_code=503)
+            print(f"[!] AI Engine Exhausted/Failed: {ai_error}")
+            return JSONResponse(content={"error": f"AI Parsing Error: {ai_error}"}, status_code=503)
 
-        # 2. VALIDATION
+        # Defense 2: Output format validation
         if not data or not isinstance(data, dict):
-            return JSONResponse(content={"error": "AI returned invalid format."}, status_code=500)
+            return JSONResponse(content={"error": "AI returned invalid or malformed data."}, status_code=500)
 
-        # 3. DATABASE SAVE
-        save_medicine_to_db(data)
+        # Defense 3: Asynchronous Database Offloading (Unblocks the API immediately)
+        background_tasks.add_task(save_medicine_to_db, data)
 
-        # 4. SUCCESS
         return JSONResponse(content=data)
 
     except Exception as fatal_error:
-        print(f"[!] FATAL ERROR: {fatal_error}")
+        print(f"FATAL ERROR in Endpoint: {fatal_error}")
         return JSONResponse(content={"error": str(fatal_error)}, status_code=500)
 
 
-# --- FETCH HISTORY ---
+# Defense 4: Synchronous execution of DB routes to prevent thread blocking on psycopg2
 @app.get("/medicines")
-async def get_all_medicines():
-    conn = get_db_connection()
-    cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
-    cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
-    rows = cursor.fetchall()
-    cursor.close()
-    conn.close()
-    return JSONResponse(content=rows)
+def get_all_medicines():
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
+        rows = cursor.fetchall()
+        cursor.close()
+        return JSONResponse(content=rows)
+    except Exception as e:
+        print(f"[!] GET /medicines failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+    finally:
+        if conn:
+            conn.close()
 
 
-# --- EXPORT ---
 @app.get("/export")
-async def export_medicines_csv():
-    conn = get_db_connection()
-    cursor = conn.cursor()
-    cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
-    rows = cursor.fetchall()
-    column_names = [desc[0] for desc in cursor.description]
-    cursor.close()
-    conn.close()
+def export_medicines_csv():
+    conn = None
+    try:
+        conn = get_db_connection()
+        cursor = conn.cursor()
+        cursor.execute('SELECT * FROM scanned_medicines ORDER BY id DESC')
+        rows = cursor.fetchall()
 
-    stream = io.StringIO()
-    writer = csv.writer(stream)
-    writer.writerow(column_names)
-    writer.writerows(rows)
+        # Guard against empty database exports
+        if not rows:
+            return JSONResponse(content={"error": "Database is empty."}, status_code=404)
 
-    response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
-    response.headers["Content-Disposition"] = "attachment; filename=supabase_medicines.csv"
-    return response
+        column_names = [desc[0] for desc in cursor.description]
+        cursor.close()
+
+        stream = io.StringIO()
+        writer = csv.writer(stream)
+        writer.writerow(column_names)
+        writer.writerows(rows)
+
+        response = StreamingResponse(iter([stream.getvalue()]), media_type="text/csv")
+        response.headers["Content-Disposition"] = "attachment; filename=supabase_medicines.csv"
+        return response
+    except Exception as e:
+        print(f"[!] GET /export failed: {e}")
+        return JSONResponse(content={"error": str(e)}, status_code=500)
+    finally:
+        if conn:
+            conn.close()
 
 
-# --- DELETE ---
 @app.delete("/medicines/{medicine_id}")
-async def delete_medicine(medicine_id: int):
+def delete_medicine(medicine_id: int):
+    conn = None
     try:
         conn = get_db_connection()
         cursor = conn.cursor()
         cursor.execute('DELETE FROM scanned_medicines WHERE id = %s', (medicine_id,))
         conn.commit()
+
+        # Check if a row was actually deleted
+        if cursor.rowcount == 0:
+            cursor.close()
+            return JSONResponse(content={"error": "Record not found."}, status_code=404)
+
         cursor.close()
-        conn.close()
-        return JSONResponse(content={"status": "success"})
+        return JSONResponse(content={"status": "success", "deleted_id": medicine_id})
     except Exception as e:
+        print(f"[!] DELETE /medicines failed: {e}")
         return JSONResponse(content={"error": str(e)}, status_code=500)
+    finally:
+        if conn:
+            conn.close()
