@@ -234,7 +234,7 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
         # 2. THE WATERFALL
         # Try Gemini
         try:
-            data = ask_gemini_vision_binary('gemini-2.0-flash', prompt, image_bytes_list)
+            data = ask_gemini_vision_binary('gemini-2.5-flash', prompt, image_bytes_list)
         except Exception as e1:
             print(f"[!] Gemini failed: {e1}")
 
