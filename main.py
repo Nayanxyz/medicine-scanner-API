@@ -104,21 +104,20 @@ async def process_binary_image(files: List[UploadFile] = File(...)):
 
         # Your original prompt, untouched
         prompt = """
-                    You are a highly precise medical data extraction AI. Look at these raw, high-resolution images of different sides of a medicine box.
+                    You are a specialized Data Extraction Engine for Indian pharmaceutical packaging.
+Analyze the provided images and extract the exact values for the requested fields.
 
-                    CRITICAL RULES:
-                    1. Separate Batch Numbers (B.No) from Dates.
-                    2. MFD/MFG/PKD = Manufacture Date. EXP/USE BY = Expiry Date.
-                    3. PRICING ACCURACY: Distinguish clearly between 0, 8, and 9. Include currency symbols (₹ or Rs).
-                    4. Return "Unknown" if unreadable.
+### STRICT EXTRACTION RULES:
+* **medicine_name**: Extract the primary commercial brand name. Do NOT extract generic chemical salts unless no brand name is visible.
+* **company**: Extract the manufacturer or "marketed by" entity.
+* **mrp**: Locate "MRP", "Max Retail Price", or "Incl. of all taxes". Strip all commas and alphabetic characters. Include the ₹ symbol. Distinguish carefully between '0', '8', and '9'.
+* **manufacture_date**: Look for prefixes: MFD, MFG, PKD, or Mfg.Date. Format exactly as MM/YYYY or DD/MM/YYYY.
+* **expiry_date**: Look for prefixes: EXP, Expiry, or Use By. Format exactly as MM/YYYY or DD/MM/YYYY.
 
-                    STRICT RULES:
-                            1. If you see text, DO NOT return 'Unknown'. Make a logical prediction based on character shapes.
-                            2. If 'MFG' or 'EXP' is blurry, look at surrounding context to infer the date.
-                            3. For MRP, ignore formatting (like commas or spaces); just return the numbers.
-                            4. If a field is 80% likely to be correct, output the value. Precision is more important than perfect confidence.
-
-                    Expected JSON keys: medicine_name, expiry_date, manufacture_date, mrp, company.
+### NEGATIVE CONSTRAINTS (DO NOT DO THIS):
+1. NEVER confuse a Batch Number (B.No, B., L.No) with a Date or MRP.
+2. NEVER guess a number if it is entirely obscured by glare or damage. If a character is partially visible, infer it based on standard medical date/price formatting.
+3. DO NOT output 'Unknown' unless the section of the box containing that data is completely missing or pitch black.
                     """
 
         # 1. PRIMARY AND ONLY AI: Gemini
