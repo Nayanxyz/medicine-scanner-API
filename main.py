@@ -4,22 +4,21 @@ import csv
 import io
 from datetime import datetime
 from dotenv import load_dotenv
-from fastapi import FastAPI, UploadFile, File, HTTPException
+from fastapi import FastAPI, UploadFile, File
 from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from typing import List
 from contextlib import asynccontextmanager
-
 from google import genai
 from google.genai import types
 import psycopg2
 from psycopg2 import pool
 import psycopg2.extras
 
-# ==========================================
+
 # 1. INITIALIZATION & ENVIRONMENT
-# ==========================================
+
 load_dotenv()
 DATABASE_URL = os.getenv("DATABASE_URL")
 
@@ -33,9 +32,9 @@ GEMINI_KEYS = [k for k in GEMINI_KEYS if k and k.strip()]
 if not GEMINI_KEYS:
     raise ValueError("CRITICAL: No Gemini API keys found in environment variables.")
 
-# ==========================================
+
 # 2. LIFESPAN & CONNECTION POOLING (THE FIX)
-# ==========================================
+
 # We use a global connection pool to prevent TCP handshake exhaustion (Database DDoS fix)
 db_pool = None
 
@@ -97,9 +96,9 @@ app.add_middleware(
 )
 
 
-# ==========================================
-# 3. DATABASE WRITE LOGIC (SYNCHRONOUS GUARANTEE)
-# ==========================================
+
+# 3. DATABASE LOGIC (SYNCHRONOUS GUARANTEE)
+
 def save_medicine_to_db(parsed_data: dict):
     """
     Saves to DB synchronously. Raises an exception if it fails,
@@ -129,9 +128,9 @@ def save_medicine_to_db(parsed_data: dict):
         db_pool.putconn(conn)
 
 
-# ==========================================
+
 # 4. AI SCHEMAS & LOGIC
-# ==========================================
+
 class MedicineDataSchema(BaseModel):
     medicine_name: str = Field(description="The commercial brand name. Return 'Unknown' if not found.")
     expiry_date: str = Field(description="Expiry date (MM/YYYY). Return 'Unknown' if not found.")
@@ -174,11 +173,8 @@ def ask_gemini_vision_binary(model_name: str, prompt: str, image_bytes_list: Lis
                 raise Exception(f"All available Gemini keys failed or hit quota. Last error: {error_str}")
 
 
-# ==========================================
+
 # 5. API ENDPOINTS (THREAD-POOLED SYNCHRONOUS)
-# ==========================================
-# FIX: Notice there is NO 'async def'. By using standard 'def', FastAPI
-# routes this entirely to a background threadpool, unblocking your server.
 
 @app.post("/scan-binary")
 def process_binary_image(files: List[UploadFile] = File(...)):
@@ -187,8 +183,7 @@ def process_binary_image(files: List[UploadFile] = File(...)):
         if not files or len(files) == 0:
             return JSONResponse(content={"error": "No images provided in the payload."}, status_code=400)
 
-        # Because we dropped 'async def', we use the synchronous '.file.read()'
-        # instead of 'await f.read()'. This is safe inside FastAPI's threadpool.
+
         image_bytes_list = [f.file.read() for f in files]
 
         prompt = """
